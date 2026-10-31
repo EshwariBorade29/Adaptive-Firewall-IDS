@@ -1,0 +1,21 @@
+# Python environment
+.venv/
+venv/
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Trained models and generated metrics
+models/
+
+# Local environment and secrets
+.env
+.env.*
+
+# Editor and operating system files
+.vscode/
+.DS_Store
+Thumbs.db
+# Temporary backup files
+*.backup

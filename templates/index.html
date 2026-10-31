@@ -1,0 +1,406 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Adaptive Firewall Dashboard</title>
+
+  <!-- Bootstrap -->
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+
+  <!-- ChartJS + SocketIO -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+
+  <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
+
+  <style>
+      body { background:#111; color:white; }
+      #alerts .alert { margin-bottom:8px; padding:8px 12px; }
+      table th, table td { color:white !important; }
+  </style>
+</head>
+
+<body class="bg-dark text-light">
+<div class="container py-4">
+
+  <h2 class="text-center mb-4">Adaptive Firewall Dashboard</h2>
+  <p class="text-center text-warning">
+  NSL-KDD KDDTest+ Dataset Replay | Not live monitoring or packet capture
+  </p>
+
+  <!-- Charts Row -->
+  <div class="row">
+    <div class="col-md-6 mb-4">
+      <div class="d-flex justify-content-center">
+        <div style="width:100%; max-width:360px;">
+          <canvas id="pieChart"></canvas>
+        </div>
+      </div>
+    </div>
+    <div class="col-md-6 mb-4">
+      <canvas id="lineChart"></canvas>
+    </div>
+  </div>
+
+  <!-- Alerts -->
+  <h4 class="mt-4">Dataset Replay Alerts</h4>
+
+  <div id="alerts" class="mt-3"></div>
+
+  <div class="d-flex justify-content-between align-items-center mt-3 mb-4">
+    <span id="alertPageInfo" class="text-secondary"></span>
+
+   <div class="d-flex gap-2">
+     <button id="prevAlerts" class="btn btn-outline-light btn-sm">
+      Previous
+     </button>
+
+     <button id="nextAlerts" class="btn btn-outline-light btn-sm">
+      Next
+     </button>
+   </div>
+  </div>
+
+  <!-- Metrics -->
+  <h4 class="mt-4">Model Performance Metrics</h4>
+  <table class="table table-dark table-bordered mt-2" id="metricsTable">
+    <thead>
+      <tr>
+        <th>Model</th>
+        <th>Accuracy</th>
+        <th>Precision</th>
+        <th>Recall</th>
+        <th>F1 Score</th>
+      </tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+
+  <!-- NEW SECTION: Probability vs Algorithm -->
+  <h4 class="mt-4">Individual Model Probabilities — Current Replayed Record</h4>
+  <canvas id="algoProbChart" style="max-height:350px;"></canvas>
+<!-- NEW: Compare Algorithms by Metric -->
+<h4 class="mt-5">Compare Models by Accuracy / Precision / Recall / F1</h4>
+
+<div class="row mb-3">
+  <div class="col-md-4">
+    <select id="metricSelector" class="form-select bg-dark text-light">
+      <option value="accuracy">Accuracy</option>
+      <option value="precision">Precision</option>
+      <option value="recall">Recall</option>
+      <option value="f1">F1 Score</option>
+    </select>
+  </div>
+</div>
+
+<canvas id="metricCompareChart" style="max-height:350px;"></canvas>
+
+</div>
+
+<script>
+/*--------------------------------------------------
+   SOCKET.IO
+--------------------------------------------------*/
+const socket = io();
+
+/*--------------------------------------------------
+   GLOBAL VARIABLES
+--------------------------------------------------*/
+let normalCount = 0, attackCount = 0;
+let timeData = [], probaData = [];
+let t = 0;
+
+
+/* --------------------------------------------------
+   ALERT PAGINATION
+-------------------------------------------------- */
+const ALERTS_PER_PAGE = 20;
+const MAX_ALERT_HISTORY = 1000;
+
+let alertHistory = [];
+let currentAlertPage = 1;
+
+function renderAlerts() {
+  const container = document.getElementById("alerts");
+
+  const totalPages = Math.max(
+    1,
+    Math.ceil(alertHistory.length / ALERTS_PER_PAGE)
+  );
+
+  currentAlertPage = Math.min(currentAlertPage, totalPages);
+
+  const start = (currentAlertPage - 1) * ALERTS_PER_PAGE;
+  const visibleAlerts = alertHistory.slice(
+    start,
+    start + ALERTS_PER_PAGE
+  );
+
+  container.replaceChildren(...visibleAlerts);
+
+  const first = alertHistory.length ? start + 1 : 0;
+  const last = Math.min(start + ALERTS_PER_PAGE, alertHistory.length);
+
+  document.getElementById("alertPageInfo").textContent =
+    `Showing ${first}–${last} of ${alertHistory.length} alerts ` +
+    `| Page ${currentAlertPage} of ${totalPages}`;
+
+  document.getElementById("prevAlerts").disabled =
+    currentAlertPage === 1;
+
+  document.getElementById("nextAlerts").disabled =
+    currentAlertPage === totalPages;
+}
+
+document.getElementById("prevAlerts").addEventListener("click", () => {
+  if (currentAlertPage > 1) {
+    currentAlertPage--;
+    renderAlerts();
+  }
+});
+
+document.getElementById("nextAlerts").addEventListener("click", () => {
+  const totalPages = Math.ceil(
+    alertHistory.length / ALERTS_PER_PAGE
+  );
+
+  if (currentAlertPage < totalPages) {
+    currentAlertPage++;
+    renderAlerts();
+  }
+});
+
+
+
+/*--------------------------------------------------
+   PIE CHART (Normal vs Attack)
+--------------------------------------------------*/
+const pieChart = new Chart(document.getElementById('pieChart'), {
+  type: 'doughnut',
+  data: {
+    labels: ['Normal', 'Attack'],
+    datasets: [{
+      data: [0,0],
+      backgroundColor: ['#00cc99', '#ff4d4d']
+    }]
+  },
+  options: { plugins:{ legend:{ labels:{ color:'#fff' } } } }
+});
+
+/*--------------------------------------------------
+   LINE CHART (Attack Probability)
+--------------------------------------------------*/
+const lineChart = new Chart(document.getElementById('lineChart'), {
+  type: 'line',
+  data: {
+    labels: [],
+    datasets: [{
+      label: 'Random Forest Attack Probability',
+      data: [],
+      borderColor: '#ffcc00',
+      tension: 0.25,
+      borderWidth: 2,
+      pointRadius: 0
+    }]
+  },
+  options: {
+    scales: {
+      x:{ ticks:{ color:'#fff' } },
+      y:{ ticks:{ color:'#fff' }, min:0, max:1 }
+    }
+  }
+});
+
+/*--------------------------------------------------
+   PROBABILITY vs MODEL GRAPH
+--------------------------------------------------*/
+const algoProbChart = new Chart(document.getElementById('algoProbChart'), {
+  type: 'bar',
+  data: {
+    labels: [],
+    datasets: [{
+      label: "Current Attack Probability",
+      data: [],
+      backgroundColor: '#3399ff'
+    }]
+  },
+  options: {
+    scales: {
+      y: { min: 0, max: 1, ticks: { color: '#fff' } },
+      x: { ticks: { color: '#fff' } }
+    },
+    plugins: {
+      legend: { labels: { color: "#fff" } }
+    }
+  }
+});
+
+let algoProbMap = {};  // store latest prob per model
+
+
+/*--------------------------------------------------
+   REAL-TIME DATA UPDATES
+--------------------------------------------------*/
+socket.on('chart_update', (d) => {
+
+  /* ---- PIE ---- */
+  if (d.prediction === 1) attackCount++;
+  else normalCount++;
+
+  pieChart.data.datasets[0].data = [normalCount, attackCount];
+  pieChart.update();
+
+  /* ---- LINE ---- */
+  timeData.push(t++);
+  probaData.push(d.proba);
+
+  if (timeData.length > 30) {
+    timeData.shift();
+    probaData.shift();
+  }
+
+  lineChart.data.labels = timeData;
+  lineChart.data.datasets[0].data = probaData;
+  lineChart.update();
+
+  /* ---- ALERT ---- */
+  const el = document.createElement('div');
+  el.className = 'alert ' + (d.prediction === 1 ? 'alert-danger' : 'alert-success');
+
+  const anomalyText =
+    d.behavior_status === "anomalous_behavior"
+      ? "⚠️ Anomaly flagged (outlier, not a confirmed attack)"
+      : d.behavior_status === "normal_behavior"
+        ? "No anomaly flagged"
+        : "Anomaly model unavailable";
+
+  el.textContent =
+    (d.prediction === 1
+      ? "⚠️ Ensemble: Attack predicted"
+      : "🟢 Ensemble: Normal predicted") +
+    ` | Ground truth: ${d.ground_truth_label}` +
+    ` | Prediction match: ${d.prediction_matches_ground_truth ? "yes" : "no"}` +
+    ` | ${anomalyText}` +
+    ` | RF attack probability: ${d.proba.toFixed(2)}` +
+    ` | Threat score: ${d.threat_score}` +
+    ` | Risk: ${d.risk_level}`;
+
+
+    // Add newest alert at the beginning of history
+  alertHistory.unshift(el);
+
+  // Keep browser memory bounded
+  if (alertHistory.length > MAX_ALERT_HISTORY) {
+    alertHistory.pop();
+  }
+
+  // If browsing older pages, preserve the visible records
+  if (currentAlertPage > 1) {
+    currentAlertPage = Math.min(
+      currentAlertPage + (alertHistory.length % ALERTS_PER_PAGE === 1 ? 1 : 0),
+      Math.ceil(alertHistory.length / ALERTS_PER_PAGE)
+    );
+  }
+
+  renderAlerts();
+
+  /* ---- ALGO PROBABILITY GRAPH ---- */
+  algoProbMap = { ...d.model_probabilities };
+
+
+  algoProbChart.data.labels = Object.keys(algoProbMap);
+  algoProbChart.data.datasets[0].data = Object.values(algoProbMap);
+  algoProbChart.update();
+});
+
+/*--------------------------------------------------
+   METRICS TABLE
+--------------------------------------------------*/
+fetch("/metrics")
+  .then(r => r.json())
+  .then(metrics => {
+    const tbody = document.querySelector("#metricsTable tbody");
+    tbody.innerHTML = "";
+
+    for (let model in metrics) {
+      const m = metrics[model];
+      tbody.innerHTML += `
+        <tr>
+          <td>${model}</td>
+          <td>${(m.accuracy * 100).toFixed(2)}%</td>
+          <td>${(m.precision * 100).toFixed(2)}%</td>
+          <td>${(m.recall * 100).toFixed(2)}%</td>
+          <td>${(m.f1 * 100).toFixed(2)}%</td>
+        </tr>
+      `;
+    }
+  });
+  /*--------------------------------------------------
+    COMPARE ALGORITHMS BY METRIC (NEW FEATURE)
+--------------------------------------------------*/
+
+let savedMetrics = {};   // Store metrics JSON
+
+// Create the metric comparison chart
+const metricCompareChart = new Chart(
+  document.getElementById('metricCompareChart'),
+  {
+    type: 'bar',
+    data: {
+      labels: [],
+      datasets: [{
+        label: "Metric Value",
+        data: [],
+        backgroundColor: "#aa66ff"
+      }]
+    },
+    options: {
+      scales: {
+        y: {
+          min: 0,
+          max: 1,
+          ticks: { color: '#fff' }
+        },
+        x: {
+          ticks: { color: '#fff' }
+        }
+      },
+      plugins: {
+        legend: {
+          labels: { color: "#fff" }
+        }
+      }
+    }
+  }
+);
+
+// FETCH METRICS ONLY ONCE
+fetch("/metrics")
+  .then(r => r.json())
+  .then(metrics => {
+    savedMetrics = metrics;
+    updateMetricGraph("accuracy");   // default chart = accuracy
+  });
+
+// When user selects a metric
+document.getElementById("metricSelector").addEventListener("change", (e) => {
+  updateMetricGraph(e.target.value);
+});
+
+// Update chart
+function updateMetricGraph(metricName) {
+
+  const models = Object.keys(savedMetrics);
+  const values = models.map(m => savedMetrics[m][metricName]);
+
+  metricCompareChart.data.labels = models;
+  metricCompareChart.data.datasets[0].data = values;
+  metricCompareChart.data.datasets[0].label = metricName.toUpperCase();
+
+  metricCompareChart.update();
+}
+
+
+</script>
+</body>
+</html>
